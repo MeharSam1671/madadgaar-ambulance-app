@@ -54,7 +54,7 @@ class StartScreen extends StatelessWidget {
                 onPressed: () {
                   Navigator.push(
                     context,
-                    MaterialPageRoute(builder: (_) => SmashScreen()),
+                    MaterialPageRoute(builder: (_) => LiveDutyScreen()),
                   );
                 },
                 style: ElevatedButton.styleFrom(

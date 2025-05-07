@@ -1,52 +1,81 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
-import 'locationscreen.dart';  // Your next screen
+import 'locationscreen.dart';
 
-class SmashScreen extends StatefulWidget {
-  const SmashScreen({super.key});
-
+class SplashScreen extends StatefulWidget {
   @override
-  _SmashScreenState createState() => _SmashScreenState();
+  _SplashScreenState createState() => _SplashScreenState();
 }
 
-class _SmashScreenState extends State<SmashScreen> {
-  bool isLoading = false; // Track loading state
+class _SplashScreenState extends State<SplashScreen> {
+  Alignment _alignment = Alignment.centerLeft;
+  bool _navigated = false;
 
   @override
   void initState() {
     super.initState();
 
-    // Start the loading and trigger the movement after some time
-    Future.delayed(const Duration(seconds: 3), () {
-      setState(() {
-        isLoading = false; // Finish loading
-      });
+    // Start ambulance animation after slight delay
+    Timer(Duration(milliseconds: 500), () {
+      if (mounted) {
+        setState(() {
+          _alignment = Alignment.centerRight;
+        });
+      }
+    });
 
-      // Navigate to next screen after loading is done
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const LocationScreen()),
-      );
+    // Navigate to LiveDutyScreen after delay, only once
+    Timer(Duration(seconds: 5), () {
+      if (!_navigated) {
+        _navigated = true;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => LiveDutyScreen()),
+        );
+      }
     });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.blue, // Background color for the screen
-      body: Stack(
+      backgroundColor: Colors.white,
+      body: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // The ambulance icon moving from left to right
-          AnimatedPositioned(
-            duration: const Duration(seconds: 3),
-            curve: Curves.easeInOut,  // Smooth transition for movement
-            left: isLoading ? -120 : MediaQuery.of(context).size.width - 120,
-            bottom: 100, // Adjust the vertical position
-            child: Image.asset(
-              'assets/images/ambulance.gif',  // Your ambulance GIF
-              width: 120,  // Set the size of the GIF
-              height: 120,
+          // Animated ambulance movement
+          Container(
+            height: 150,
+            child: AnimatedAlign(
+              alignment: _alignment,
+              duration: Duration(seconds: 3),
+              curve: Curves.easeInOut,
+              child: Image.asset(
+                'assets/ambulance.gif',
+                height: 100,
+              ),
             ),
+          ),
+          SizedBox(height: 20),
+          Text(
+            'MadadGaar',
+            style: TextStyle(
+              fontSize: 28,
+              fontWeight: FontWeight.bold,
+              color: Colors.red.shade700,
+            ),
+          ),
+          SizedBox(height: 8),
+          Text(
+            'Your Emergency Companion',
+            style: TextStyle(
+              fontSize: 16,
+              color: Colors.grey.shade700,
+            ),
+          ),
+          SizedBox(height: 30),
+          CircularProgressIndicator(
+            color: Colors.red.shade400,
           ),
         ],
       ),
