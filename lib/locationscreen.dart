@@ -1,19 +1,37 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:socket_io_client/socket_io_client.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'smashscreen.dart';
+import 'dart:async'; // Add this import for StreamSubscription
 
 class LiveDutyScreen extends StatefulWidget {
+  const LiveDutyScreen({super.key});
+
   @override
-  _LiveDutyScreenState createState() => _LiveDutyScreenState();
+  State<LiveDutyScreen> createState() => _LiveDutyScreenState();
 }
 
-class _LiveDutyScreenState extends State<LiveDutyScreen> with SingleTickerProviderStateMixin {
+class _LiveDutyScreenState extends State<LiveDutyScreen>
+    with SingleTickerProviderStateMixin {
   GoogleMapController? _mapController;
   LatLng? _currentPosition;
   LatLng? location;
   late AnimationController _animationController;
   late Animation<double> _animation;
+  Socket socket = io(
+    'https://madadgaar.centralindia.cloudapp.azure.com/api',
+    OptionBuilder()
+        .disableAutoConnect()
+        .setTransports(['websocket'])
+        .setExtraHeaders({
+          'Authorization':
+              'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjYsInJvbGUiOiJkcml2ZXIiLCJuYW1lIjoiSm9obiBEb2UiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ.72oAz14YIPftgkhfRN6CTmZXA1xhmiVuN4cfoX92uLE',
+        })
+        .build(),
+  );
+  StreamSubscription<Position>? _locationSubscription;
 
   @override
   void initState() {
@@ -35,6 +53,10 @@ class _LiveDutyScreenState extends State<LiveDutyScreen> with SingleTickerProvid
   @override
   void dispose() {
     _animationController.dispose();
+    // Disconnect the socket when leaving the screen
+    socket.disconnect();
+    // Cancel any active location stream subscription
+    _locationSubscription?.cancel();
     super.dispose();
   }
 
@@ -45,12 +67,35 @@ class _LiveDutyScreenState extends State<LiveDutyScreen> with SingleTickerProvid
     }
 
     LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
       permission = await Geolocator.requestPermission();
     }
 
-    if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
-      Geolocator.getPositionStream(
+    if (permission == LocationPermission.whileInUse ||
+        permission == LocationPermission.always) {
+      // Make sure socket is disconnected before connecting again
+      if (socket.connected) {
+        socket.disconnect();
+      }
+
+      socket.connect();
+      socket.onConnect((_) {
+        if (kDebugMode) {
+          print('Socket connected');
+        }
+      });
+      socket.onConnectError((data) {
+        if (kDebugMode) {
+          print('Socket connection error: $data');
+        }
+      });
+
+      // Cancel any existing subscription
+      _locationSubscription?.cancel();
+
+      // Create a new subscription
+      _locationSubscription = Geolocator.getPositionStream(
         locationSettings: LocationSettings(
           accuracy: LocationAccuracy.high,
           distanceFilter: 5,
@@ -59,12 +104,22 @@ class _LiveDutyScreenState extends State<LiveDutyScreen> with SingleTickerProvid
         final newPosition = LatLng(position.latitude, position.longitude);
         setState(() {
           _currentPosition = newPosition;
-          location=newPosition;
+          location = newPosition;
         });
-
-        _mapController?.animateCamera(
-          CameraUpdate.newLatLng(newPosition),
+        socket.emitWithAck(
+          'myLocationUpdate',
+          {
+            'lat': position.latitude,
+            'lang': position.longitude,
+            'timestamp': DateTime.now().toIso8601String(),
+          },
+          ack: (data) {
+            if (kDebugMode) {
+              print('myLocationUpdate emission acknowledged: $data');
+            }
+          },
         );
+        _mapController?.animateCamera(CameraUpdate.newLatLng(newPosition));
       });
     }
   }
@@ -72,106 +127,114 @@ class _LiveDutyScreenState extends State<LiveDutyScreen> with SingleTickerProvid
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-
-      body: _currentPosition == null
-          ? SplashScreen()
-          : Stack(
-        children: [
-          // Google Map without default location dot
-          GoogleMap(
-            onMapCreated: (controller) {
-              _mapController = controller;
-              _mapController?.moveCamera(
-                CameraUpdate.newLatLngZoom(_currentPosition!, 16),
-              );
-            },
-            initialCameraPosition: CameraPosition(
-              target: _currentPosition!,
-              zoom: 16,
-            ),
-            myLocationEnabled: false,
-            myLocationButtonEnabled: false,
-            markers: {}, // No markers used
-          ),
-
-          // Custom animated green dot at center
-          IgnorePointer(
-            child: Center(
-              child: AnimatedBuilder(
-                animation: _animation,
-                builder: (_, __) {
-                  return Container(
-                    width: 96,
-                    height: 96,
-                    alignment: Alignment.center,
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        Container(
-                          width: _animation.value,
-                          height: _animation.value,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: Colors.green.withOpacity(1 - (_animation.value / 80)),
-                          ),
-                        ),
-                        Container(
-                          width: 20,
-                          height: 20,
-                          decoration: BoxDecoration(
-                            color: Colors.green,
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.white, width: 2),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-
-          // Bottom card
-          Positioned(
-            bottom: 30,
-            left: 20,
-            right: 20,
-            child: Container(
-              padding: EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: [BoxShadow(blurRadius: 5, color: Colors.black26)],
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
+      body:
+          _currentPosition == null
+              ? SplashScreen()
+              : Stack(
                 children: [
-                  Text(
-                    'You are now available',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.green,
+                  // Google Map without default location dot
+                  GoogleMap(
+                    onMapCreated: (controller) {
+                      _mapController = controller;
+                      _mapController?.moveCamera(
+                        CameraUpdate.newLatLngZoom(_currentPosition!, 16),
+                      );
+                    },
+                    initialCameraPosition: CameraPosition(
+                      target: _currentPosition!,
+                      zoom: 16,
+                    ),
+                    myLocationEnabled: false,
+                    myLocationButtonEnabled: false,
+                    markers: {}, // No markers used
+                  ),
+
+                  // Custom animated green dot at center
+                  IgnorePointer(
+                    child: Center(
+                      child: AnimatedBuilder(
+                        animation: _animation,
+                        builder: (_, __) {
+                          return Container(
+                            width: 96,
+                            height: 96,
+                            alignment: Alignment.center,
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                Container(
+                                  width: _animation.value,
+                                  height: _animation.value,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: Colors.green.withAlpha(
+                                      (255 * (1 - (_animation.value / 80)))
+                                          .round(),
+                                    ),
+                                  ),
+                                ),
+                                Container(
+                                  width: 20,
+                                  height: 20,
+                                  decoration: BoxDecoration(
+                                    color: Colors.green,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: Colors.white,
+                                      width: 2,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
                     ),
                   ),
-                  SizedBox(height: 8),
-                  ElevatedButton(
-                    onPressed: () {
-                      Navigator.pop(context);
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.grey.shade200,
-                      foregroundColor: Colors.black,
+
+                  // Bottom card
+                  Positioned(
+                    bottom: 30,
+                    left: 20,
+                    right: 20,
+                    child: Container(
+                      padding: EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(blurRadius: 5, color: Colors.black26),
+                        ],
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'You are now available',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.green,
+                            ),
+                          ),
+                          SizedBox(height: 8),
+                          ElevatedButton(
+                            onPressed: () {
+                              Navigator.pop(context);
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.grey.shade200,
+                              foregroundColor: Colors.black,
+                            ),
+                            child: Text('Go Offline'),
+                          ),
+                        ],
+                      ),
                     ),
-                    child: Text('Go Offline'),
                   ),
                 ],
               ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

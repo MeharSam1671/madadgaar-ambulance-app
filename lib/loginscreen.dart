@@ -1,5 +1,4 @@
 import 'package:ambulance/startscreen.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 class LoginScreen extends StatelessWidget {
@@ -44,7 +43,7 @@ class LoginScreen extends StatelessWidget {
                     labelText: 'Phone Number',
                     labelStyle: const TextStyle(color: Colors.white70),
                     filled: true,
-                    fillColor: Colors.white.withOpacity(0.2),
+                    fillColor: Colors.white.withAlpha((0.2 * 255).round()),
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
                       borderSide: const BorderSide(color: Colors.white54),
@@ -64,7 +63,7 @@ class LoginScreen extends StatelessWidget {
                     labelText: 'Vehicle Number (e.g. AQH 2093)',
                     labelStyle: const TextStyle(color: Colors.white70),
                     filled: true,
-                    fillColor: Colors.white.withOpacity(0.2),
+                    fillColor: Colors.white.withAlpha((0.2 * 255).round()),
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
                       borderSide: const BorderSide(color: Colors.white54),

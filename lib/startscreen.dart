@@ -1,5 +1,3 @@
-import 'package:ambulance/smashscreen.dart';
-import 'package:ambulance/userui.dart';
 import 'package:flutter/material.dart';
 import 'locationscreen.dart'; // Replace with your next screen
 

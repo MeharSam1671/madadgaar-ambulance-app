@@ -1,8 +1,13 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 class UserUI extends StatelessWidget {
+  const UserUI({super.key});
+
   void _callAmbulance() {
-    print("Calling ambulance crew...");
+    if (kDebugMode) {
+      print("Calling ambulance crew...");
+    }
   }
 
   @override

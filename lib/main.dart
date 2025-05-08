@@ -1,5 +1,3 @@
-import 'package:ambulance/startscreen.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import 'loginscreen.dart';

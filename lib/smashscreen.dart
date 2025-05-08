@@ -3,8 +3,10 @@ import 'dart:async';
 import 'locationscreen.dart';
 
 class SplashScreen extends StatefulWidget {
+  const SplashScreen({super.key});
+
   @override
-  _SplashScreenState createState() => _SplashScreenState();
+  State<SplashScreen> createState() => _SplashScreenState();
 }
 
 class _SplashScreenState extends State<SplashScreen> {
@@ -44,7 +46,7 @@ class _SplashScreenState extends State<SplashScreen> {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           // Animated ambulance movement
-          Container(
+          SizedBox(
             height: 150,
             child: AnimatedAlign(
               alignment: _alignment,
