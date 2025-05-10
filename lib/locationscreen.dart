@@ -20,18 +20,12 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
   LatLng? location;
   late AnimationController _animationController;
   late Animation<double> _animation;
-  Socket socket = io(
-    'https://madadgaar.centralindia.cloudapp.azure.com/api',
-    OptionBuilder()
-        .disableAutoConnect()
-        .setTransports(['websocket'])
-        .setExtraHeaders({
-          'Authorization':
-              'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjYsInJvbGUiOiJkcml2ZXIiLCJuYW1lIjoiSm9obiBEb2UiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ.72oAz14YIPftgkhfRN6CTmZXA1xhmiVuN4cfoX92uLE',
-        })
-        .build(),
-  );
+  late Socket socket;
   StreamSubscription<Position>? _locationSubscription;
+  bool _isReconnecting = false;
+  Timer? _reconnectTimer;
+  int _reconnectAttempts = 0;
+  final int _reconnectDelay = 5000; // milliseconds
 
   @override
   void initState() {
@@ -47,7 +41,94 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
       CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
     );
 
+    _initializeSocket();
     _startLocationUpdates();
+  }
+
+  void _initializeSocket() {
+    socket = io(
+      'https://madadgaar.centralindia.cloudapp.azure.com/api',
+      OptionBuilder()
+          .disableAutoConnect()
+          .setTransports(['websocket'])
+          .setExtraHeaders({
+            'Authorization':
+                'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjYsInJvbGUiOiJkcml2ZXIiLCJuYW1lIjoiSm9obiBEb2UiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ.72oAz14YIPftgkhfRN6CTmZXA1xhmiVuN4cfoX92uLE',
+          })
+          .build(),
+    );
+
+    // Set up socket event listeners
+    socket.onConnect((_) {
+      if (kDebugMode) {
+        print('Socket connected');
+      }
+      // Reset reconnection attempts on successful connection
+      _reconnectAttempts = 0;
+      _isReconnecting = false;
+    });
+
+    socket.onConnectError((data) {
+      if (kDebugMode) {
+        print('Socket connection error: $data');
+      }
+      _tryReconnect();
+    });
+
+    socket.onDisconnect((_) {
+      if (kDebugMode) {
+        print('Socket disconnected');
+      }
+      _tryReconnect();
+    });
+
+    socket.on('ping', (data) {
+      socket.emit('pong');
+      if (kDebugMode) {
+        print('Pong emitted');
+      }
+    });
+
+    // Connect socket
+    socket.connect();
+  }
+
+  void _tryReconnect() {
+    // Only attempt to reconnect if we're not already trying
+    if (!_isReconnecting) {
+      _isReconnecting = true;
+      _reconnectAttempts++;
+
+      // Use a fixed delay of 5 seconds between each retry
+      int currentDelay = _reconnectDelay; // 5000 milliseconds
+
+      if (kDebugMode) {
+        print(
+          'Attempting to reconnect (attempt #$_reconnectAttempts) in ${currentDelay / 1000} seconds',
+        );
+      }
+
+      // Cancel any existing timer
+      _reconnectTimer?.cancel();
+
+      // Set a timer to attempt reconnection with the fixed delay
+      _reconnectTimer = Timer(Duration(milliseconds: currentDelay), () {
+        if (!socket.connected) {
+          if (kDebugMode) {
+            print('Reconnecting to socket...');
+          }
+
+          // Disconnect first to ensure clean state
+          socket.disconnect();
+
+          // Then try to connect again
+          socket.connect();
+
+          // Mark that we're no longer in the reconnecting process
+          _isReconnecting = false;
+        }
+      });
+    }
   }
 
   @override
@@ -57,6 +138,8 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
     socket.disconnect();
     // Cancel any active location stream subscription
     _locationSubscription?.cancel();
+    // Cancel reconnect timer if active
+    _reconnectTimer?.cancel();
     super.dispose();
   }
 
@@ -74,23 +157,6 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
 
     if (permission == LocationPermission.whileInUse ||
         permission == LocationPermission.always) {
-      // Make sure socket is disconnected before connecting again
-      if (socket.connected) {
-        socket.disconnect();
-      }
-
-      socket.connect();
-      socket.onConnect((_) {
-        if (kDebugMode) {
-          print('Socket connected');
-        }
-      });
-      socket.onConnectError((data) {
-        if (kDebugMode) {
-          print('Socket connection error: $data');
-        }
-      });
-
       // Cancel any existing subscription
       _locationSubscription?.cancel();
 
@@ -106,19 +172,24 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
           _currentPosition = newPosition;
           location = newPosition;
         });
-        socket.emitWithAck(
-          'myLocationUpdate',
-          {
-            'lat': position.latitude,
-            'lang': position.longitude,
-            'timestamp': DateTime.now().toIso8601String(),
-          },
-          ack: (data) {
-            if (kDebugMode) {
-              print('myLocationUpdate emission acknowledged: $data');
-            }
-          },
-        );
+        
+        // Only emit location if socket is connected
+        if (socket.connected) {
+          socket.emitWithAck(
+            'myLocationUpdate',
+            {
+              'lat': position.latitude,
+              'lang': position.longitude,
+              'timestamp': DateTime.now().toIso8601String(),
+            },
+            ack: (data) {
+              if (kDebugMode) {
+                print('myLocationUpdate emission acknowledged: $data');
+              }
+            },
+          );
+        }
+        
         _mapController?.animateCamera(CameraUpdate.newLatLng(newPosition));
       });
     }
