@@ -1,10 +1,11 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'smashscreen.dart';
-import 'dart:async'; // Add this import for StreamSubscription
+import 'dart:async'; // For Timer, StreamSubscription
 
 class LiveDutyScreen extends StatefulWidget {
   const LiveDutyScreen({super.key});
@@ -17,7 +18,11 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
     with SingleTickerProviderStateMixin {
   GoogleMapController? _mapController;
   LatLng? _currentPosition;
-  LatLng? location;
+  // bool _mapReady = false;
+
+  // Controls whether we auto-recenter on location updates
+  bool _followUser = true;
+
   late AnimationController _animationController;
   late Animation<double> _animation;
   late Socket socket;
@@ -27,45 +32,110 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
   int _reconnectAttempts = 0;
   final int _reconnectDelay = 5000; // milliseconds
 
+  // Emergency request related variables
+  bool _showEmergencyRequest = false;
+  bool _emergencyAccepted = false;
+
+  // Dynamic emergency data from event:
+  LatLng? _emergencyLatLng;
+  String? _currentEmergencyId;
+  String _estimatedDistance = "";
+  String _estimatedTime = "";
+
+  // Timer to auto-hide notification after 2 minutes
+  Timer? _notificationTimer;
+
+  // Markers and Circles
+  final Set<Marker> _markers = {};
+  Set<Circle> _circles = {};
+
   @override
   void initState() {
     super.initState();
 
-    // Set up the pulsing animation
+    // Set up the pulsing animation controller (will drive circle radius)
     _animationController = AnimationController(
       vsync: this,
       duration: Duration(seconds: 2),
     )..repeat();
 
-    _animation = Tween<double>(begin: 0, end: 80).animate(
+    // Animate from 0 to 1; we'll scale this to a suitable radius in meters
+    _animation = Tween<double>(begin: 0, end: 1).animate(
       CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
     );
 
+    // Listen to animation ticks: if an emergency location is set, update circle radius
+    _animationController.addListener(() {
+      if (_emergencyLatLng != null &&
+          (_showEmergencyRequest || _emergencyAccepted)) {
+        // Choose a max radius in meters for the pulsing effect. Adjust as needed.
+        const double maxRadiusMeters = 100.0;
+        double fraction = _animation.value; // 0.0 to 1.0
+        double radius = fraction * maxRadiusMeters;
+        final Circle pulseCircle = Circle(
+          circleId: CircleId('emergency_pulse'),
+          center: _emergencyLatLng!,
+          radius: radius,
+          fillColor:
+              (_emergencyAccepted
+                  ? Colors.red.withAlpha(77)
+                  : Colors.orange.withAlpha(77)),
+          strokeColor: Colors.transparent,
+        );
+        setState(() {
+          _circles = {pulseCircle};
+        });
+      }
+    });
+
     _initializeSocket();
     _startLocationUpdates();
+
+    // Temporarily skip custom marker asset loading.
+    // We'll use defaultMarkerWithHue instead.
   }
 
-  void _initializeSocket() {
+  Future<void> _initializeSocket() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('auth_token');
     socket = io(
-      'https://madadgaar.centralindia.cloudapp.azure.com/api',
+      'http://10.0.2.2:4000/api',
       OptionBuilder()
           .disableAutoConnect()
           .setTransports(['websocket'])
           .setExtraHeaders({
-            'Authorization':
-                'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjYsInJvbGUiOiJkcml2ZXIiLCJuYW1lIjoiSm9obiBEb2UiLCJhZG1pbiI6dHJ1ZSwiaWF0IjoxNTE2MjM5MDIyfQ.72oAz14YIPftgkhfRN6CTmZXA1xhmiVuN4cfoX92uLE',
+            'Authorization': 'Bearer $token',
           })
           .build(),
     );
 
-    // Set up socket event listeners
     socket.onConnect((_) {
       if (kDebugMode) {
         print('Socket connected');
       }
-      // Reset reconnection attempts on successful connection
       _reconnectAttempts = 0;
       _isReconnecting = false;
+
+      if (_currentPosition != null) {
+        if (kDebugMode) {
+          print('Sending initial location on socket connect');
+        }
+        socket.emitWithAck(
+          'myLocationUpdate',
+          {
+            'lat': _currentPosition!.latitude,
+            'lang': _currentPosition!.longitude,
+            'timestamp': DateTime.now().toIso8601String(),
+          },
+          ack: (data) {
+            if (kDebugMode) {
+              print('Initial location update acknowledged: $data');
+            }
+          },
+        );
+      } else {
+        _getInitialLocation();
+      }
     });
 
     socket.onConnectError((data) {
@@ -89,42 +159,35 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
       }
     });
 
-    // Connect socket
+    // Listen for emergencyAssignment event
+    socket.on('emergencyAssignment', (data) {
+      if (kDebugMode) {
+        print('Received emergencyAssignment: $data');
+      }
+      _handleEmergencyAssignment(data);
+    });
+
     socket.connect();
   }
 
   void _tryReconnect() {
-    // Only attempt to reconnect if we're not already trying
     if (!_isReconnecting) {
       _isReconnecting = true;
       _reconnectAttempts++;
-
-      // Use a fixed delay of 5 seconds between each retry
-      int currentDelay = _reconnectDelay; // 5000 milliseconds
-
+      int currentDelay = _reconnectDelay;
       if (kDebugMode) {
         print(
           'Attempting to reconnect (attempt #$_reconnectAttempts) in ${currentDelay / 1000} seconds',
         );
       }
-
-      // Cancel any existing timer
       _reconnectTimer?.cancel();
-
-      // Set a timer to attempt reconnection with the fixed delay
       _reconnectTimer = Timer(Duration(milliseconds: currentDelay), () {
         if (!socket.connected) {
           if (kDebugMode) {
             print('Reconnecting to socket...');
           }
-
-          // Disconnect first to ensure clean state
           socket.disconnect();
-
-          // Then try to connect again
           socket.connect();
-
-          // Mark that we're no longer in the reconnecting process
           _isReconnecting = false;
         }
       });
@@ -134,12 +197,10 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
   @override
   void dispose() {
     _animationController.dispose();
-    // Disconnect the socket when leaving the screen
     socket.disconnect();
-    // Cancel any active location stream subscription
     _locationSubscription?.cancel();
-    // Cancel reconnect timer if active
     _reconnectTimer?.cancel();
+    _notificationTimer?.cancel();
     super.dispose();
   }
 
@@ -157,10 +218,7 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
 
     if (permission == LocationPermission.whileInUse ||
         permission == LocationPermission.always) {
-      // Cancel any existing subscription
       _locationSubscription?.cancel();
-
-      // Create a new subscription
       _locationSubscription = Geolocator.getPositionStream(
         locationSettings: LocationSettings(
           accuracy: LocationAccuracy.high,
@@ -168,12 +226,12 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
         ),
       ).listen((Position position) {
         final newPosition = LatLng(position.latitude, position.longitude);
+
+        bool firstFix = _currentPosition == null;
         setState(() {
           _currentPosition = newPosition;
-          location = newPosition;
         });
-        
-        // Only emit location if socket is connected
+
         if (socket.connected) {
           socket.emitWithAck(
             'myLocationUpdate',
@@ -189,8 +247,189 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
             },
           );
         }
-        
-        _mapController?.animateCamera(CameraUpdate.newLatLng(newPosition));
+
+        // Recenter only if first fix or if user requested follow (_followUser true)
+        if (_mapController != null && (firstFix || _followUser)) {
+          _mapController!.animateCamera(
+            CameraUpdate.newLatLngZoom(newPosition, 14),
+          );
+        }
+      });
+    }
+  }
+
+  void _getInitialLocation() async {
+    try {
+      Position position = await Geolocator.getCurrentPosition(
+        locationSettings: LocationSettings(accuracy: LocationAccuracy.high),
+      );
+
+      final newPosition = LatLng(position.latitude, position.longitude);
+      setState(() {
+        _currentPosition = newPosition;
+      });
+
+      if (socket.connected) {
+        socket.emitWithAck(
+          'myLocationUpdate',
+          {
+            'lat': position.latitude,
+            'lang': position.longitude,
+            'timestamp': DateTime.now().toIso8601String(),
+          },
+          ack: (data) {
+            if (kDebugMode) {
+              print('Initial location update acknowledged: $data');
+            }
+          },
+        );
+      }
+
+      // Center map if ready
+      if (_mapController != null) {
+        _mapController!.animateCamera(
+          CameraUpdate.newLatLngZoom(newPosition, 14),
+        );
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('Error getting initial location: $e');
+      }
+    }
+  }
+
+  // ===========================
+  // Emergency handling methods
+  // ===========================
+
+  void _handleEmergencyAssignment(dynamic data) {
+    // Expecting data to be a Map with keys: lat, lng, distance, time, emergencyId
+    try {
+      final parsedLat =
+          (data['lat'] is num)
+              ? data['lat'].toDouble()
+              : double.parse(data['lat'].toString());
+      final parsedLng =
+          (data['lng'] is num)
+              ? data['lng'].toDouble()
+              : double.parse(data['lng'].toString());
+      final distance = data['distance']?.toString() ?? "";
+      final eta = data['time']?.toString() ?? "";
+      final id = data['emergencyId']?.toString() ?? "";
+
+      final newLatLng = LatLng(parsedLat, parsedLng);
+
+      // Cancel any existing notification timer
+      _notificationTimer?.cancel();
+
+      setState(() {
+        _emergencyLatLng = newLatLng;
+        _estimatedDistance = distance;
+        _estimatedTime = eta;
+        _currentEmergencyId = id;
+        _showEmergencyRequest = true;
+        _emergencyAccepted = false;
+
+        // Update markers: clear previous emergency marker if any, then add new
+        _markers.removeWhere((m) => m.markerId.value == 'emergency');
+        _markers.add(
+          Marker(
+            markerId: MarkerId('emergency'),
+            position: newLatLng,
+            // Use default marker with orange hue
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              BitmapDescriptor.hueOrange,
+            ),
+          ),
+        );
+
+        // Also reset circles; animation listener will add pulsing circle
+        _circles.removeWhere((c) => c.circleId.value == 'emergency_pulse');
+      });
+
+      // Start timer to auto-hide after 2 minutes if not accepted/rejected
+      _notificationTimer = Timer(Duration(minutes: 2), () {
+        _onEmergencyTimeout();
+      });
+    } catch (e) {
+      if (kDebugMode) {
+        print('Error parsing emergencyAssignment data: $e');
+      }
+    }
+  }
+
+  void _onEmergencyTimeout() {
+    // If still showing and not accepted, clear UI
+    if (!_emergencyAccepted && _showEmergencyRequest) {
+      if (kDebugMode) {
+        print('Emergency notification timed out, hiding UI.');
+      }
+      setState(() {
+        _showEmergencyRequest = false;
+        // Remove marker and circle
+        _markers.removeWhere((m) => m.markerId.value == 'emergency');
+        _circles.removeWhere((c) => c.circleId.value == 'emergency_pulse');
+      });
+    }
+    _notificationTimer?.cancel();
+    _notificationTimer = null;
+  }
+
+  void _acceptEmergency() {
+    if (_emergencyLatLng == null || _currentEmergencyId == null) {
+      return;
+    }
+    _notificationTimer?.cancel();
+    _notificationTimer = null;
+    if (kDebugMode) {
+      print('Accepting emergency with id $_currentEmergencyId');
+    }
+    setState(() {
+      _showEmergencyRequest = false;
+      _emergencyAccepted = true;
+      _markers.removeWhere((m) => m.markerId.value == 'emergency');
+      _markers.add(
+        Marker(
+          markerId: MarkerId('emergency'),
+          position: _emergencyLatLng!,
+          // Use default marker with red hue
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+        ),
+      );
+      // Circle remains; its color changes via animation listener using _emergencyAccepted
+    });
+    socket.emit('emergencyAccepted', {
+      'emergencyId': _currentEmergencyId,
+      'acceptedAt': DateTime.now().toIso8601String(),
+    });
+  }
+
+  void _rejectEmergency() {
+    _notificationTimer?.cancel();
+    _notificationTimer = null;
+    if (kDebugMode) {
+      print('Rejecting emergency id $_currentEmergencyId');
+    }
+    setState(() {
+      _showEmergencyRequest = false;
+      _emergencyAccepted = false;
+      _markers.removeWhere((m) => m.markerId.value == 'emergency');
+      _circles.removeWhere((c) => c.circleId.value == 'emergency_pulse');
+      _emergencyLatLng = null;
+      _currentEmergencyId = null;
+      _estimatedDistance = "";
+      _estimatedTime = "";
+    });
+  }
+
+  // Recenter button handler
+  void _onRecenterPressed() {
+    if (_currentPosition != null && _mapController != null) {
+      _mapController!.animateCamera(
+        CameraUpdate.newLatLngZoom(_currentPosition!, 14),
+      );
+      setState(() {
+        _followUser = true;
       });
     }
   }
@@ -203,68 +442,202 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
               ? SplashScreen()
               : Stack(
                 children: [
-                  // Google Map without default location dot
                   GoogleMap(
                     onMapCreated: (controller) {
                       _mapController = controller;
-                      _mapController?.moveCamera(
-                        CameraUpdate.newLatLngZoom(_currentPosition!, 16),
-                      );
+                      // _mapReady = true;
+                      // Center initially if we already have location
+                      if (_currentPosition != null) {
+                        _mapController!.moveCamera(
+                          CameraUpdate.newLatLngZoom(_currentPosition!, 14),
+                        );
+                      }
                     },
                     initialCameraPosition: CameraPosition(
                       target: _currentPosition!,
-                      zoom: 16,
+
+                      zoom: 14,
                     ),
-                    myLocationEnabled: false,
+                    myLocationEnabled: true,
                     myLocationButtonEnabled: false,
-                    markers: {}, // No markers used
+                    markers: _markers,
+                    circles: _circles,
+                    onCameraMoveStarted: () {
+                      // User interacted with map -> stop auto-follow
+                      if (_followUser) {
+                        setState(() {
+                          _followUser = false;
+                        });
+                      }
+                    },
+                    // You can enable map UI settings as desired:
+                    zoomControlsEnabled: false,
+                    zoomGesturesEnabled: true,
+                    tiltGesturesEnabled: true,
+                    rotateGesturesEnabled: true,
                   ),
 
-                  // Custom animated green dot at center
-                  IgnorePointer(
-                    child: Center(
-                      child: AnimatedBuilder(
-                        animation: _animation,
-                        builder: (_, __) {
-                          return Container(
-                            width: 96,
-                            height: 96,
-                            alignment: Alignment.center,
-                            child: Stack(
-                              alignment: Alignment.center,
+                  // Emergency request banner at top
+                  if (_showEmergencyRequest)
+                    Positioned(
+                      top: 40,
+                      left: 20,
+                      right: 20,
+                      child: Container(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 12,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          boxShadow: [
+                            BoxShadow(blurRadius: 5, color: Colors.black26),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                _estimatedDistance.isNotEmpty
+                                    ? 'Emergency request - $_estimatedDistance away'
+                                    : 'Emergency request',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            Row(
                               children: [
-                                Container(
-                                  width: _animation.value,
-                                  height: _animation.value,
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    color: Colors.green.withAlpha(
-                                      (255 * (1 - (_animation.value / 80)))
-                                          .round(),
-                                    ),
+                                IconButton(
+                                  icon: Icon(
+                                    Icons.check_circle,
+                                    color: Colors.green,
+                                  ),
+                                  onPressed: _acceptEmergency,
+                                ),
+                                SizedBox(width: 8),
+                                IconButton(
+                                  icon: Icon(Icons.cancel, color: Colors.red),
+                                  onPressed: _rejectEmergency,
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                  // Route details overlay (shown when emergency is accepted)
+                  if (_emergencyAccepted)
+                    Positioned(
+                      bottom: 100,
+                      left: 20,
+                      right: 20,
+                      child: Container(
+                        padding: EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: [
+                            BoxShadow(blurRadius: 5, color: Colors.black26),
+                          ],
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  'Emergency Route',
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.red,
                                   ),
                                 ),
-                                Container(
-                                  width: 20,
-                                  height: 20,
-                                  decoration: BoxDecoration(
-                                    color: Colors.green,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: Colors.white,
-                                      width: 2,
+                                Icon(Icons.warning, color: Colors.red),
+                              ],
+                            ),
+                            SizedBox(height: 8),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceAround,
+                              children: [
+                                Column(
+                                  children: [
+                                    Text(
+                                      'Distance',
+                                      style: TextStyle(color: Colors.grey),
+                                    ),
+                                    Text(
+                                      _estimatedDistance,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                Column(
+                                  children: [
+                                    Text(
+                                      'ETA',
+                                      style: TextStyle(color: Colors.grey),
+                                    ),
+                                    Text(
+                                      _estimatedTime,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                Column(
+                                  children: [
+                                    Text(
+                                      'Traffic',
+                                      style: TextStyle(color: Colors.grey),
+                                    ),
+                                    Text(
+                                      'Moderate',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                            SizedBox(height: 12),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Container(
+                                    padding: EdgeInsets.symmetric(vertical: 8),
+                                    decoration: BoxDecoration(
+                                      color: Colors.blue.shade50,
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Center(
+                                      child: Text(
+                                        'Via Main St → First Ave → Hospital Rd',
+                                        style: TextStyle(
+                                          color: Colors.blue.shade800,
+                                        ),
+                                      ),
                                     ),
                                   ),
                                 ),
                               ],
                             ),
-                          );
-                        },
+                          ],
+                        ),
                       ),
                     ),
-                  ),
 
-                  // Bottom card
+                  // Bottom "You are available" or "Responding to Emergency" card
                   Positioned(
                     bottom: 30,
                     left: 20,
@@ -282,11 +655,16 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            'You are now available',
+                            _emergencyAccepted
+                                ? 'Responding to Emergency'
+                                : 'You are now available',
                             style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
-                              color: Colors.green,
+                              color:
+                                  _emergencyAccepted
+                                      ? Colors.red
+                                      : Colors.green,
                             ),
                           ),
                           SizedBox(height: 8),
@@ -298,12 +676,29 @@ class _LiveDutyScreenState extends State<LiveDutyScreen>
                               backgroundColor: Colors.grey.shade200,
                               foregroundColor: Colors.black,
                             ),
-                            child: Text('Go Offline'),
+                            child: Text(
+                              _emergencyAccepted
+                                  ? 'Cancel Response'
+                                  : 'Go Offline',
+                            ),
                           ),
                         ],
                       ),
                     ),
                   ),
+
+                  // Recenter FAB
+                  if (_currentPosition != null)
+                    Positioned(
+                      bottom: 100,
+                      right: 16,
+                      child: FloatingActionButton(
+                        mini: true,
+                        onPressed: _onRecenterPressed,
+                        tooltip: 'Recenter on my location',
+                        child: Icon(Icons.my_location),
+                      ),
+                    ),
                 ],
               ),
     );

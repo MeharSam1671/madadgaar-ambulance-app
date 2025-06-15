@@ -1,8 +1,70 @@
 import 'package:ambulance/startscreen.dart';
+import 'package:ambulance/utils/api_controller.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-class LoginScreen extends StatelessWidget {
+class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final ApiController apiController = ApiController();
+  String email = "", password = "";
+
+  @override
+  void initState() {
+    super.initState();
+    // _checkAuth();
+  }
+
+  //TODO: Check authentication status on init
+
+  // ignore: unused_element
+  Future<void> _checkAuth() async {
+    final SharedPreferences sharedPreferences =
+        await SharedPreferences.getInstance();
+    final token = sharedPreferences.getString('auth_token');
+    if (token != null && token.isNotEmpty) {
+      if (kDebugMode) {
+        print('User is already authenticated with token: $token');
+      }
+      // Redirect using post frame callback to ensure context is ready.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => StartScreen()),
+        );
+      });
+    }
+  }
+
+  Future<void> _submitLogin(BuildContext context) async {
+    try {
+      final response = await apiController.post("/auth/login", {
+        'email': email,
+        'password': password,
+        'asRole': 'DRIVER',
+      });
+
+      final SharedPreferences sharedPreferences =
+          await SharedPreferences.getInstance();
+      await sharedPreferences.setString('auth_token', response['access_token']);
+      if (context.mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => StartScreen()),
+        );
+      }
+    } catch (error) {
+      if (kDebugMode) {
+        print('Error during login: $error');
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -24,7 +86,11 @@ class LoginScreen extends StatelessWidget {
                 const CircleAvatar(
                   radius: 50,
                   backgroundColor: Colors.white,
-                  child: Icon(Icons.local_hospital, size: 50, color: Colors.red),
+                  child: Icon(
+                    Icons.local_hospital,
+                    size: 50,
+                    color: Colors.red,
+                  ),
                 ),
                 const SizedBox(height: 16),
                 const Text(
@@ -37,11 +103,13 @@ class LoginScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 32),
                 TextField(
-                  keyboardType: TextInputType.phone,
+                  keyboardType: TextInputType.emailAddress,
+                  onChanged: (value) => email = value,
                   decoration: InputDecoration(
-                    prefixIcon: const Icon(Icons.phone, color: Colors.blueGrey),
-                    labelText: 'Phone Number',
+                    prefixIcon: const Icon(Icons.email, color: Colors.blueGrey),
+                    labelText: 'Email',
                     labelStyle: const TextStyle(color: Colors.white70),
+                    hintText: 'usman.akram@rescue1122.pk',
                     filled: true,
                     fillColor: Colors.white.withAlpha((0.2 * 255).round()),
                     enabledBorder: OutlineInputBorder(
@@ -57,10 +125,14 @@ class LoginScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 TextField(
-                  textCapitalization: TextCapitalization.characters,
+                  keyboardType: TextInputType.visiblePassword,
+                  onChanged: (value) => password = value,
                   decoration: InputDecoration(
-                    prefixIcon: const Icon(Icons.directions_car, color: Colors.blueGrey),
-                    labelText: 'Vehicle Number (e.g. AQH 2093)',
+                    prefixIcon: const Icon(
+                      Icons.password,
+                      color: Colors.blueGrey,
+                    ),
+                    labelText: 'Password',
                     labelStyle: const TextStyle(color: Colors.white70),
                     filled: true,
                     fillColor: Colors.white.withAlpha((0.2 * 255).round()),
@@ -74,16 +146,20 @@ class LoginScreen extends StatelessWidget {
                     ),
                   ),
                   style: const TextStyle(color: Colors.white),
+                  obscureText: true,
                 ),
                 const SizedBox(height: 24),
                 ElevatedButton(
                   onPressed: () {
-                    Navigator.push(context, MaterialPageRoute(builder: (context) => StartScreen()));
+                    _submitLogin(context);
                   },
                   style: ElevatedButton.styleFrom(
                     foregroundColor: Colors.white,
                     backgroundColor: Colors.redAccent,
-                    padding: const EdgeInsets.symmetric(horizontal: 80, vertical: 16),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 80,
+                      vertical: 16,
+                    ),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(8),
                     ),

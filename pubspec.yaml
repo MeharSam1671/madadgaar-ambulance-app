@@ -38,6 +38,8 @@ dependencies:
   google_maps_flutter: ^2.12.1
   geocoding: ^3.0.0
   socket_io_client: ^3.1.2
+  http: ^1.4.0
+  shared_preferences: ^2.5.3
 
 dev_dependencies:
   flutter_test:
